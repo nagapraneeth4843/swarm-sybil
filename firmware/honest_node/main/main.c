@@ -318,33 +318,104 @@ static void print_neighbours_task(void *arg)
     }
 }
 
+
+
 static void update_task(void *arg)
 {
-    float vals[MAX_DEVICES + 1];
+    float vals[MAX_DEVICES];
+
     for (;;)
     {
+        // Read the local sensor and capture our current estimate.
         float s = read_sensor();
         g_sensor = s;
+
+        float own_x = helper_g_x_read();
         int n = 0;
         int64_t now = esp_timer_get_time();
 
+        // Collect fresh neighbour estimates.
         xSemaphoreTake(g_mtx, portMAX_DELAY);
+
         for (int i = 0; i < MAX_DEVICES; i++)
-            if (g_nb[i].valid && (now - g_nb[i].last_seen_us) <= STALENESS)
+        {
+            if (g_nb[i].valid &&
+                (now - g_nb[i].last_seen_us) <= STALENESS)
+            {
                 vals[n++] = g_nb[i].state;
+            }
+        }
+
         xSemaphoreGive(g_mtx);
 
-        vals[n++] = helper_g_x_read();   
+        // W-MSR: mark up to F neighbours on each side of own_x.
+        uint8_t trimmed[MAX_DEVICES] = {0};
 
-        float num = g_lambda*s;
-        float denom = g_lambda;
-        for (int i = 0; i < n; i++) {num += vals[i]; denom += 1.0f;}
+        for (int f = 0; f < F_PARAM; f++)
+        {
+            int low_idx = -1;
+            int high_idx = -1;
+
+            float low_value = own_x;
+            float high_value = own_x;
+
+            for (int i = 0; i < n; i++)
+            {
+                if (trimmed[i])
+                    continue;
+
+                if (vals[i] < low_value)
+                {
+                    low_value = vals[i];
+                    low_idx = i;
+                }
+
+                if (vals[i] > high_value)
+                {
+                    high_value = vals[i];
+                    high_idx = i;
+                }
+            }
+
+            if (low_idx >= 0)
+                trimmed[low_idx] = 1;
+
+            if (high_idx >= 0 && high_idx != low_idx)
+                trimmed[high_idx] = 1;
+        }
+
+        // Average the local estimate, sensor anchor and untrimmed neighbours.
+        float num = g_lambda * s + own_x;
+        float denom = g_lambda + 1.0f;
+
+        for (int i = 0; i < n; i++)
+        {
+            if (!trimmed[i])
+            {
+                num += vals[i];
+                denom += 1.0f;
+            }
+        }
+
         float sum = num / denom;
-        helper_g_x_update(sum);
+
+printf("W-MSR: own=%.3f sensor=%.3f | ", own_x, s);
+
+for (int i = 0; i < n; i++)
+{
+    printf("%.3f%s ",
+           vals[i],
+           trimmed[i] ? "[TRIMMED]" : "[KEPT]");
+}
+
+printf("| result=%.3f\n", sum);
+
+helper_g_x_update(sum);
 
         vTaskDelay(pdMS_TO_TICKS(UPDATE_PERIOD_MS));
     }
 }
+
 
 void app_main(void)
 {

@@ -21,6 +21,8 @@
 #define UPDATE_PERIOD_MS 250
 #define ESP_NOW_CHANNEL 6
 #define STALENESS 1500000
+#define ENABLE_MISLEADING_STATE_TEST 0 // STEP 12: Controlled misleading-state test. // Enable ONLY when building firmware for the designated test board
+#define TEST_MISLEADING_STATE 0.950f
 
 const uint8_t broadcast_addr[ESP_NOW_ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static uint8_t g_my_mac[6];
@@ -145,9 +147,7 @@ float read_sensor(void){
     for (int i=0; i<16; i++){
         int raw_value;
         ESP_ERROR_CHECK(adc_oneshot_read(adc_handle, ADC_CHANNEL_6, &raw_value));
-        sum+=raw_value;
-
-    }
+        sum+=raw_value; }
     
     float average= sum / 16.0f;
     float normalized_value= average / 4095.0f;
@@ -162,7 +162,15 @@ static void sender_task(void *arg)
 
     for (;;)
     {
-        pkt.state = helper_g_x_read();
+        float real_state = helper_g_x_read();
+
+#if ENABLE_MISLEADING_STATE_TEST
+    pkt.state = TEST_MISLEADING_STATE;
+    printf("TEST MODE: real=%.3f advertised=%.3f\n",
+           real_state, pkt.state);
+#else
+    pkt.state = real_state;
+#endif
         pkt.sensor = g_sensor;     
         esp_err_t err = esp_now_send(
             broadcast_addr,

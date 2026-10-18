@@ -17,6 +17,7 @@
 #include "freertos/semphr.h"
 #include "esp_adc/adc_oneshot.h"
 
+#define TELEM_PERIOD_MS 500
 #define MAX_DEVICES 16
 #define UPDATE_PERIOD_MS 250
 #define ESP_NOW_CHANNEL 6
@@ -30,6 +31,7 @@ static uint8_t g_my_mac_valid = 0;
 static adc_oneshot_unit_handle_t adc_handle;
 static volatile float g_lambda = 1.0f;
 static volatile float g_sensor;
+static volatile int g_def_count = 0;
 
 static volatile float g_x;
 static SemaphoreHandle_t g_x_mtx;
@@ -126,7 +128,7 @@ static void on_sent(const uint8_t *mac_addr,
 {
     
         if (status != ESP_NOW_SEND_SUCCESS){
-            printf("ESP-NOW send: failed\n");
+            //printf("ESP-NOW send: failed\n");
         }
 
 }
@@ -179,7 +181,8 @@ static void sender_task(void *arg)
 
         if (err != ESP_OK)
         {
-            printf("ESP-NOW send request failed: %s\n", esp_err_to_name(err));
+          // Suppress non-CSV output during telemetry capture.
+          //  printf("ESP-NOW send request failed: %s\n", esp_err_to_name(err));
         }
         pkt.seq++;
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -258,9 +261,9 @@ static void print_station_mac(void)
 
     ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, g_my_mac));
     g_my_mac_valid = 1;
-    printf("Station MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
-           (unsigned)g_my_mac[0], (unsigned)g_my_mac[1], (unsigned)g_my_mac[2],
-           (unsigned)g_my_mac[3], (unsigned)g_my_mac[4], (unsigned)g_my_mac[5]);
+    //printf("Station MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+         //  (unsigned)g_my_mac[0], (unsigned)g_my_mac[1], (unsigned)g_my_mac[2],
+         //  (unsigned)g_my_mac[3], (unsigned)g_my_mac[4], (unsigned)g_my_mac[5]);
 }
 static void print_wifi_channel(void)
 {
@@ -283,7 +286,7 @@ static void init_esp_now_broadcast(void)
     peer.ifidx = WIFI_IF_STA;
     peer.encrypt = false;
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));
-    printf("ESP-NOW ready: broadcast peer registered\n");
+    //printf("ESP-NOW ready: broadcast peer registered\n");
 }
 static void csi_probe_cb(void *ctx, wifi_csi_info_t *info)
 {
@@ -297,31 +300,23 @@ static void print_neighbours_task(void *arg)
     {
         if (xSemaphoreTake(g_mtx, portMAX_DELAY) == pdTRUE)
         {
-            printf("neighbours=");
+            // Diagnostic output disabled for CSV telemetry.
 
             for (int i = 0; i < MAX_DEVICES; i++)
             {
                 if (g_nb[i].valid && ((esp_timer_get_time()-g_nb[i].last_seen_us)> STALENESS)){
                     g_nb[i].valid= false;
                     continue;
-                }
-                
-                if (g_nb[i].valid)
-                {
-                    printf(" [%02X:%02X seq=%lu, state=%.3f]",
-                           g_nb[i].id[4],
-                           g_nb[i].id[5],
-                           (unsigned long)g_nb[i].pkt_count,
-                           (double)g_nb[i].state);
-                }
+                }              
             }
 
-            printf("\n");
+           
 
             xSemaphoreGive(g_mtx);
         }
+        #if 0
         printf("my_x=%.3f, sensor=%.3f\n", (double)helper_g_x_read(), (double)read_sensor());
-
+        #endif
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -358,6 +353,7 @@ static void update_task(void *arg)
 
         // W-MSR: mark up to F neighbours on each side of own_x.
         uint8_t trimmed[MAX_DEVICES] = {0};
+        int def_count = 0;
 
         for (int f = 0; f < F_PARAM; f++)
         {
@@ -390,7 +386,14 @@ static void update_task(void *arg)
 
             if (high_idx >= 0 && high_idx != low_idx)
                 trimmed[high_idx] = 1;
+            def_count = 0;
+for (int i = 0; i < n; i++)
+{
+    if (trimmed[i])
+        def_count++;
+}
         }
+        g_def_count = def_count;
 
         // Average the local estimate, sensor anchor and untrimmed neighbours.
         float num = g_lambda * s + own_x;
@@ -407,6 +410,7 @@ static void update_task(void *arg)
 
         float sum = num / denom;
 
+#if 0
 printf("W-MSR: own=%.3f sensor=%.3f | ", own_x, s);
 
 for (int i = 0; i < n; i++)
@@ -415,8 +419,8 @@ for (int i = 0; i < n; i++)
            vals[i],
            trimmed[i] ? "[TRIMMED]" : "[KEPT]");
 }
+#endif
 
-printf("| result=%.3f\n", sum);
 
 helper_g_x_update(sum);
 
@@ -424,11 +428,56 @@ helper_g_x_update(sum);
     }
 }
 
+static void telemetry_task(void *arg)
+{
+    printf("NODE,TS_MS,STATE,SENSOR,NNB,DEF,NEIGHBOURS\n");
+
+    for (;;)
+    {
+        const int64_t now_us = esp_timer_get_time();
+        const uint32_t ts_ms = (uint32_t)(now_us / 1000);
+        const float state = helper_g_x_read();
+        const float sensor = g_sensor;
+
+        neighbor_t snapshot[MAX_DEVICES];
+        int nnb = 0;
+
+        xSemaphoreTake(g_mtx, portMAX_DELAY);
+
+        for (int i = 0; i < MAX_DEVICES; i++)
+        {
+            if (g_nb[i].valid &&
+                (now_us - g_nb[i].last_seen_us) <= STALENESS)
+            {
+                snapshot[nnb++] = g_nb[i];
+            }
+        }
+
+        xSemaphoreGive(g_mtx);
+
+        printf("%02X%02X,%lu,%.4f,%.4f,%d,0",
+       g_my_mac[4], g_my_mac[5],
+       (unsigned long)ts_ms,
+       (double)state, (double)sensor, nnb);
+
+        for (int i = 0; i < nnb; i++)
+{
+    printf(",%02X%02X:%.3f:1",
+           snapshot[i].id[4],
+           snapshot[i].id[5],
+           (double)snapshot[i].alpha);
+}
+
+printf("\n");
+        vTaskDelay(pdMS_TO_TICKS(TELEM_PERIOD_MS));
+    }
+}
+
 
 void app_main(void)
 {
-    printf("honest_node: skeleton. Begin at Step 4.\n");
-    printf("sizeof(swarm_pkt_t) = %d\n", (int)sizeof(swarm_pkt_t));
+    //printf("honest_node: skeleton. Begin at Step 4.\n");
+    //printf("sizeof(swarm_pkt_t) = %d\n", (int)sizeof(swarm_pkt_t));
     status_init();
     status_rgb(false, true, false);
     ESP_ERROR_CHECK(nvs_flash_init());
@@ -444,13 +493,14 @@ void app_main(void)
     g_sensor = read_sensor();
     // helper_g_x_update((float)esp_random() / (float)UINT32_MAX);
     helper_g_x_update(read_sensor());
-    printf("initial x = %.3f\n", (double)helper_g_x_read());
-    print_wifi_channel();
+    //printf("initial x = %.3f\n", (double)helper_g_x_read());
+    //print_wifi_channel();
     print_station_mac();
     init_esp_now_broadcast();
 
     xTaskCreate(update_task, "update", 4096, NULL, 5, NULL);
     xTaskCreate(sender_task, "sender", 4096, NULL, 5, NULL);
+    xTaskCreate(telemetry_task, "telemetry", 4096, NULL, 5, NULL);
 
     xTaskCreate(print_neighbours_task,
                 "print_neighbours",

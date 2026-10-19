@@ -217,11 +217,17 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
         return;
     }
 
-    if (info == NULL || info->src_addr == NULL ||
-        memcmp(info->src_addr, pkt.src_id, 6) != 0)
+    if (info == NULL || info->src_addr == NULL)
     {
         g_src_mismatch_count++;
         return;
+    }
+
+    /* Count physical/payload identity mismatches for Step 15 telemetry, but
+       key neighbours by the claimed protocol ID so Sybil IDs are admitted. */
+    if (memcmp(info->src_addr, pkt.src_id, 6) != 0)
+    {
+        g_src_mismatch_count++;
     }
 
     wmsr_on_packet(&pkt);

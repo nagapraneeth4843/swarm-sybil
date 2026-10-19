@@ -7,6 +7,8 @@
 /* ---- Radio ---------------------------------------------------------- */
 #define SWARM_CHANNEL       6          /* survey the band, pick 1/6/11   */
 #define BCAST_PERIOD_MS     200        /* state broadcast interval       */
+#define PER_ID_MS           10         /* delay between Sybil identities */
+#define MIN_REST_MS         20         /* minimum rest between cycles */
 #define UPDATE_PERIOD_MS    250        /* W-MSR update interval          */
 #define TRUST_PERIOD_MS     1000       /* trust-matrix recompute interval*/
 #define TELEM_PERIOD_MS     500        /* serial telemetry interval      */

@@ -34,7 +34,7 @@ See `docs/` for the project build guide. Follow the documented workflow:
 | Step 11 | W-MSR-style neighbour trimming with `F_PARAM = 1` | Implemented and tested; does not guarantee Sybil resistance |
 | Step 12 | Controlled misleading-state test mode | Implemented; disabled by default; CSV telemetry requirements remain to be verified |
 | Step 14 | Single-identity forged-state attacker firmware | Implemented; two-board radio test pending |
-| Step 15 | Multi-identity Sybil attack | Pending |
+| Step 15 | Multi-identity Sybil attack | Implemented; validated on a two-board setup; full swarm experiment pending |
 | Step 16 | Repeated baseline experiments and CSV dataset | Pending |
 | Step 17 | Replay attack experiment | Pending |
 | Steps 18-25 | Physical-layer measurements and fingerprinting | Pending verification against the manual |
@@ -56,7 +56,7 @@ The current trimming implementation is an experimental W-MSR-style mechanism. It
 - The full eight-node configuration has not been verified in the current test session.
 - The manual's required CSV telemetry format needs to be verified.
 - The attacker firmware and command interface are implemented; the required two-board radio test remains pending.
-- Multi-identity Sybil and replay experiments are pending.
+- Sybil injection was validated on a two-board setup; the full swarm experiment and replay experiment remain pending.
 - Physical-layer fingerprinting, detection, and defence must be validated against the documented experiment plan.
 
 ## Development Principle

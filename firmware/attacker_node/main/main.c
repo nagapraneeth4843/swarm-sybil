@@ -28,6 +28,16 @@ static bool g_forging = false;
 static float g_forged_state = 0.9f;
 static float g_state = 0.0f;
 
+#define MAX_SYBIL_IDENTITIES 15u
+static bool g_sybil = false;
+static uint8_t g_sybil_count = 0;
+
+static void make_sybil_id(uint8_t id[ESP_NOW_ETH_ALEN], unsigned index)
+{
+    memcpy(id, g_my_mac, ESP_NOW_ETH_ALEN);
+    id[5] ^= (uint8_t)index;
+}
+
 static float read_sensor(void)
 {
     int sum = 0;
@@ -92,34 +102,69 @@ static void sender_task(void *arg)
     for (;;) {
         float sensor = read_sensor();
         bool forging;
+        bool sybil;
+        uint8_t sybil_count;
         float forged_state;
 
         portENTER_CRITICAL(&g_mode_mux);
         forging = g_forging;
+        sybil = g_sybil;
+        sybil_count = g_sybil_count;
         forged_state = g_forged_state;
         portEXIT_CRITICAL(&g_mode_mux);
 
-        if (forging) {
-            pkt.state = forged_state;
-            pkt.sensor = forged_state;
-            pkt.flags = FLAG_FORGED;
-        } else {
-            g_state = sensor;
-            pkt.state = g_state;
-            pkt.sensor = sensor;
-            pkt.flags = FLAG_HONEST;
-        }
-
+       if (sybil) {
+    for (unsigned identity = 1; identity <= sybil_count; identity++) {
+        make_sybil_id(pkt.src_id, identity);
+        pkt.state = forged_state;
+        pkt.sensor = forged_state;
+        pkt.flags = FLAG_SYBIL;
         pkt.t_us = esp_timer_get_time();
 
         esp_err_t err = esp_now_send(
             broadcast_addr, (const uint8_t *)&pkt, sizeof(pkt));
-
         if (err != ESP_OK) {
-    printf("Send failed: %s\n", esp_err_to_name(err));
-}
+            printf("Send failed: %s\n", esp_err_to_name(err));
+        }
 
         pkt.seq++;
+
+        if (identity < sybil_count) {
+            vTaskDelay(pdMS_TO_TICKS(PER_ID_MS));
+        }
+    }
+
+    int rest_ms = (int)BCAST_PERIOD_MS -
+                  ((int)sybil_count * (int)PER_ID_MS);
+
+    if (rest_ms < (int)MIN_REST_MS) {
+        rest_ms = MIN_REST_MS;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(rest_ms));
+    continue;
+} else {
+            memcpy(pkt.src_id, g_my_mac, sizeof(g_my_mac));
+            if (forging) {
+                pkt.state = forged_state;
+                pkt.sensor = forged_state;
+                pkt.flags = FLAG_FORGED;
+            } else {
+                g_state = sensor;
+                pkt.state = g_state;
+                pkt.sensor = sensor;
+                pkt.flags = FLAG_HONEST;
+            }
+
+            pkt.t_us = esp_timer_get_time();
+            esp_err_t err = esp_now_send(
+                broadcast_addr, (const uint8_t *)&pkt, sizeof(pkt));
+            if (err != ESP_OK) {
+                printf("Send failed: %s\n", esp_err_to_name(err));
+            }
+            pkt.seq++;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(BCAST_PERIOD_MS));
     }
 }
@@ -129,7 +174,7 @@ static void command_task(void *arg)
     (void)arg;
     char line[64];
 
-    printf("Commands: ATK:FORGE:0.9 | ATK:STOP\n");
+    printf("Commands: ATK:FORGE:<value> | ATK:SYBIL:<count>:<value> | ATK:STOP\n");
 
     for (;;) {
         if (fgets(line, sizeof(line), stdin) == NULL) {
@@ -142,8 +187,10 @@ static void command_task(void *arg)
         if (strcmp(line, "ATK:STOP") == 0) {
             portENTER_CRITICAL(&g_mode_mux);
             g_forging = false;
+            g_sybil = false;
+            g_sybil_count = 0;
             portEXIT_CRITICAL(&g_mode_mux);
-            printf("FORGE stopped; normal sensor broadcasts resumed\n");
+            printf("Attack stopped; normal sensor broadcasts resumed\n");
             continue;
         }
 
@@ -166,13 +213,54 @@ static void command_task(void *arg)
             portENTER_CRITICAL(&g_mode_mux);
             g_forged_state = value;
             g_forging = true;
+            g_sybil = false;
+            g_sybil_count = 0;
             portEXIT_CRITICAL(&g_mode_mux);
 
             printf("FORGE active: %.3f\n", (double)value);
             continue;
         }
 
-        printf("Unknown command. Use ATK:FORGE:0.9 or ATK:STOP\n");
+        const char sybil_prefix[] = "ATK:SYBIL:";
+        if (strncmp(line, sybil_prefix, sizeof(sybil_prefix) - 1) == 0) {
+            char *count_text = line + sizeof(sybil_prefix) - 1;
+            char *separator = strchr(count_text, ':');
+            if (separator == NULL) {
+                printf("Usage: ATK:SYBIL:<count 1..15>:<value 0..1>\n");
+                continue;
+            }
+
+            *separator = '\0';
+            char *count_end = NULL;
+            unsigned long count = strtoul(count_text, &count_end, 10);
+            char *value_text = separator + 1;
+            char *value_end = NULL;
+            float value = strtof(value_text, &value_end);
+            while (value_end != NULL && isspace((unsigned char)*value_end)) {
+                value_end++;
+            }
+
+            if (count_end == count_text || *count_end != '\0' ||
+                count < 1 || count > MAX_SYBIL_IDENTITIES ||
+                value_end == value_text || value_end == NULL || *value_end != '\0' ||
+                !(value >= 0.0f && value <= 1.0f)) {
+                printf("Usage: ATK:SYBIL:<count 1..15>:<value 0..1>\n");
+                continue;
+            }
+
+            portENTER_CRITICAL(&g_mode_mux);
+            g_forged_state = value;
+            g_forging = false;
+            g_sybil_count = (uint8_t)count;
+            g_sybil = true;
+            portEXIT_CRITICAL(&g_mode_mux);
+
+            printf("SYBIL active: %lu identities at %.3f\n",
+                   count, (double)value);
+            continue;
+        }
+
+        printf("Unknown command. Use ATK:FORGE:<value>, ATK:SYBIL:<count>:<value>, or ATK:STOP\n");
     }
 }
 

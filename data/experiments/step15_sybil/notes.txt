@@ -1,0 +1,10 @@
+Experiment: Step 15 - Sybil attack
+Command: ATK:SYBIL:5:0.9
+Honest node ID: 304C
+Attacker physical MAC suffix: 420C
+Sybil identities observed: 420D, 420E, 420F, 4208, 4209
+Observed neighbour count during attack: 6
+Observed consensus state: approximately 0.829
+Observed honest sensor: approximately 0.54-0.56
+Hardware configuration: 2 ESP32 boards
+Limitation: Seven-honest-node experiment not performed

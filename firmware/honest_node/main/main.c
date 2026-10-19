@@ -37,6 +37,10 @@ static volatile float g_x;
 static SemaphoreHandle_t g_x_mtx;
 
 static volatile uint32_t g_received_count = 0;
+static volatile uint32_t g_forged_count = 0;
+static volatile uint32_t g_bad_length_count = 0;
+static volatile uint32_t g_bad_magic_count = 0;
+static volatile uint32_t g_src_mismatch_count = 0;
 static volatile uint32_t g_baseline_seq = 0;
 static volatile uint32_t g_last_seq = 0;
 static volatile bool g_have_baseline = false;
@@ -50,6 +54,7 @@ typedef struct
     float alpha; 
     int64_t last_seen_us;
     uint32_t pkt_count;
+    uint8_t flags;
     bool valid;
 } neighbor_t;
 
@@ -100,6 +105,7 @@ static void wmsr_on_packet(const swarm_pkt_t *pkt){
 
     if(idx >= 0){
         g_nb[idx].state = pkt->state;
+        g_nb[idx].flags = pkt->flags;
         g_nb[idx].last_seen_us = esp_timer_get_time();
         g_nb[idx].pkt_count++;
     }
@@ -194,6 +200,7 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
     swarm_pkt_t pkt;
     if (len != sizeof(pkt))
     {
+        g_bad_length_count++;
         return;
     }
 
@@ -201,6 +208,7 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     if (pkt.magic != PKT_MAGIC)
     {
+        g_bad_magic_count++;
         return;
     }
 
@@ -209,7 +217,18 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
         return;
     }
 
+    if (info == NULL || info->src_addr == NULL ||
+        memcmp(info->src_addr, pkt.src_id, 6) != 0)
+    {
+        g_src_mismatch_count++;
+        return;
+    }
+
     wmsr_on_packet(&pkt);
+    if (pkt.flags & FLAG_FORGED)
+{
+    g_forged_count++;
+}
 
     if (!g_have_baseline)
     {
@@ -218,8 +237,6 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
     }
     g_last_seq = pkt.seq;
     g_received_count++;
-
-   
 }
 
 
@@ -351,9 +368,8 @@ static void update_task(void *arg)
 
         xSemaphoreGive(g_mtx);
 
-        // W-MSR: mark up to F neighbours on each side of own_x.
+                // W-MSR: mark up to F neighbours on each side of own_x.
         uint8_t trimmed[MAX_DEVICES] = {0};
-        int def_count = 0;
 
         for (int f = 0; f < F_PARAM; f++)
         {
@@ -386,12 +402,13 @@ static void update_task(void *arg)
 
             if (high_idx >= 0 && high_idx != low_idx)
                 trimmed[high_idx] = 1;
-            def_count = 0;
-for (int i = 0; i < n; i++)
-{
-    if (trimmed[i])
-        def_count++;
-}
+        }
+
+        int def_count = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (trimmed[i])
+                def_count++;
         }
         g_def_count = def_count;
 
@@ -430,7 +447,7 @@ helper_g_x_update(sum);
 
 static void telemetry_task(void *arg)
 {
-    printf("NODE,TS_MS,STATE,SENSOR,NNB,DEF,NEIGHBOURS\n");
+    printf("NODE,TS_MS,STATE,SENSOR,NNB,DEF,RX,FORGED,BADLEN,BADMAGIC,SRCMISMATCH,NEIGHBOURS\n");
 
     for (;;)
     {
@@ -455,17 +472,23 @@ static void telemetry_task(void *arg)
 
         xSemaphoreGive(g_mtx);
 
-        printf("%02X%02X,%lu,%.4f,%.4f,%d,0",
+        printf("%02X%02X,%lu,%.4f,%.4f,%d,%d,%lu,%lu,%lu,%lu,%lu",
        g_my_mac[4], g_my_mac[5],
        (unsigned long)ts_ms,
-       (double)state, (double)sensor, nnb);
+       (double)state, (double)sensor, nnb, g_def_count,
+       (unsigned long)g_received_count,
+       (unsigned long)g_forged_count,
+       (unsigned long)g_bad_length_count,
+       (unsigned long)g_bad_magic_count,
+       (unsigned long)g_src_mismatch_count);
 
         for (int i = 0; i < nnb; i++)
 {
-    printf(",%02X%02X:%.3f:1",
+    printf(",%02X%02X:%.3f:%u",
            snapshot[i].id[4],
            snapshot[i].id[5],
-           (double)snapshot[i].alpha);
+           (double)snapshot[i].state,
+           (unsigned)snapshot[i].flags);
 }
 
 printf("\n");
